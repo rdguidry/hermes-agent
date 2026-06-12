@@ -2,8 +2,11 @@
 
 import sys
 
-import acp
 import pytest
+
+pytest.importorskip("acp", reason="agent-client-protocol required for ACP tests")
+
+import acp
 
 from acp_adapter import entry
 

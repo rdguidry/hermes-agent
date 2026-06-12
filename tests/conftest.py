@@ -13,6 +13,11 @@ Hermetic-test invariants enforced here (see AGENTS.md for rationale):
 3. **Deterministic runtime.** TZ=UTC, LANG=C.UTF-8, PYTHONHASHSEED=0.
 4. **No HERMES_SESSION_* inheritance** — the agent's current gateway
    session must not leak into tests.
+5. **No host git config.** GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM point at
+   ``os.devnull`` so a developer's ``commit.gpgsign``, signing keys,
+   hooks, or identity can't affect fixtures that run ``git`` in tempdir
+   repos. Fixtures must set ``user.name``/``user.email`` locally (CI
+   provides none globally either).
 
 These invariants make the local test run match CI closely. Gaps that
 remain (CPU count, xdist worker count) are addressed by the canonical
@@ -378,6 +383,15 @@ def _hermetic_environment(tmp_path, monkeypatch):
     # should never perform that implicit network/bootstrap path; Tirith-specific
     # tests opt back in by patching the security config directly.
     monkeypatch.setenv("TIRITH_ENABLED", "false")
+
+    # 4c. Isolate git from host configuration. A developer's (or managed
+    #     environment's) ~/.gitconfig can set commit.gpgsign=true, signing
+    #     programs, hooks, or credential helpers that break fixtures doing
+    #     ``git commit`` in tempdir repos (exit 128 when the signer is
+    #     unavailable). Same pattern as tools/checkpoint_manager.py.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
 
     # 5. Reset plugin singleton so tests don't leak plugins from
     #    ~/.hermes/plugins/ (which, per step 3, is now empty — but the

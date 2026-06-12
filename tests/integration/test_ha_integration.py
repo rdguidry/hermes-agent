@@ -13,6 +13,8 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp required for the fake HA server")
+
 from unittest.mock import AsyncMock
 
 from gateway.config import Platform, PlatformConfig

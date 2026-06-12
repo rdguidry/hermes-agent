@@ -18,6 +18,9 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp required for webhook adapter tests")
+
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

@@ -13,6 +13,9 @@ import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytest.importorskip("aiohttp.test_utils", reason="aiohttp required for API server tests")
+
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 

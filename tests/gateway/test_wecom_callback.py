@@ -56,6 +56,7 @@ class TestWecomCrypto:
 
 class TestWecomCallbackEventConstruction:
     def test_build_event_extracts_text_message(self):
+        pytest.importorskip("defusedxml", reason="_build_event requires defusedxml")
         adapter = WecomCallbackAdapter(_config())
         xml_text = """
         <xml>
@@ -76,6 +77,7 @@ class TestWecomCallbackEventConstruction:
         assert event.text == "\u4f60\u597d"
 
     def test_build_event_returns_none_for_subscribe(self):
+        pytest.importorskip("defusedxml", reason="_build_event requires defusedxml")
         adapter = WecomCallbackAdapter(_config())
         xml_text = """
         <xml>
@@ -280,6 +282,7 @@ class TestWecomCallbackSendTokenRefresh:
 class TestWecomCallbackPollLoop:
     @pytest.mark.asyncio
     async def test_poll_loop_dispatches_handle_message(self, monkeypatch):
+        pytest.importorskip("defusedxml", reason="_build_event requires defusedxml")
         adapter = WecomCallbackAdapter(_config())
         calls = []
 

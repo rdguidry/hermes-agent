@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
+pytest.importorskip("acp", reason="agent-client-protocol required for ACP tests")
+
 import acp
 from acp.agent.router import build_agent_router
 from acp.schema import (

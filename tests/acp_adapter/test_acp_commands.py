@@ -2,6 +2,9 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+
+pytest.importorskip("acp", reason="agent-client-protocol required for ACP tests")
+
 from acp.schema import TextContentBlock
 
 from acp_adapter.server import HermesACPAgent
