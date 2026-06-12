@@ -40,19 +40,29 @@ alive afterwards.
   "apple-mail-mcp" ...` since Monday — its output around a gateway start
   should show AppleEvents `-1743 not authorized` style denials.
 
-## Next steps (where the session left off)
+## RESOLUTION (2026-06-12): Docker terminal backend was the root cause
 
-1. User to paste the crash output from the stderr log — 40 lines after the
-   gateway's 19:02:00 spawn of apple-mail:
-   ```bash
-   n=$(grep -n "starting MCP server 'apple-mail'" ~/.hermes/logs/mcp-stderr.log | sed -n '3p' | cut -d: -f1); sed -n "${n},$((n+40))p" ~/.hermes/logs/mcp-stderr.log
-   ```
-2. Determine how the gateway is launched (LaunchAgent? login item? nohup from
-   a terminal?) — that decides which app needs the TCC grant.
-3. Likely fix: grant Automation → Mail (and possibly Full Disk Access) to the
-   process responsible for the gateway in System Settings → Privacy &
-   Security → Automation; or launch the gateway once from Terminal so the
-   prompt can appear and be approved.
+The user's Hermes agent itself reported it: the Hermes terminal backend was set
+to **docker**, and per the user's `apple-macos-integration` skill, Apple
+ecosystem MCPs (Mail, Calendar, Notes, Messages) only work on a **local**
+macOS backend — no JXA / `~/Library/Mail/V10` inside a Linux container. This
+matches the observed evidence (apple-mail-mcp spawned and died on every
+gateway start; survived when run from the user's terminal).
+
+User chose: **switch backend back to local.** Steps given (run on Mac Studio):
+
+1. `hermes setup terminal` → pick "Local" (or set `terminal.backend: "local"`
+   in `~/.hermes/config.yaml`, block around line 181).
+2. Restart gateway: `hermes gateway run --replace` — first restart in the
+   FOREGROUND from Terminal so the macOS Automation prompt
+   ("…wants to control Mail") can appear; approve it.
+3. Verify: `pgrep -fl apple-mail-mcp` stays alive after ~1 min, and
+   `grep "starting MCP server" ~/.hermes/logs/mcp-stderr.log | tail -8`.
+   Then have the agent call `list_accounts`.
+
+If it still dies on local backend: crash output is in mcp-stderr.log right
+after the newest spawn header; next suspect is the Automation/Full Disk Access
+grant in System Settings → Privacy & Security.
 
 ## Useful codebase facts learned (this repo)
 
