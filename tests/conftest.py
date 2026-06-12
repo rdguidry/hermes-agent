@@ -528,6 +528,17 @@ def _ensure_current_event_loop(request):
 #    ``check_output`` reject any ``systemctl ... <verb> hermes-gateway``
 #    invocation that would mutate the live unit. Read-only systemctl
 #    calls (``status``, ``show``, ``list-units``) still pass through.
+#  • The same subprocess interception rejects mutating ``git`` commands
+#    (``stash`` / ``reset`` / ``checkout`` / ``pull`` / ...) whose
+#    effective directory is THIS repository checkout, and any spawn of
+#    the real ``hermes update`` CLI. ``cmd_update`` runs the updater's
+#    git flow against ``PROJECT_ROOT`` — a test that reaches it without
+#    full mocking autostashes the developer's uncommitted work, runs
+#    ``reset --hard``, and flips the branch to main (observed during a
+#    parallel ``tests/hermes_cli`` run; same incident class as the
+#    PR #23285 gateway kills). Read-only git (``status``, ``rev-parse``,
+#    ``log``, ``stash list``, ...) still passes through, and tempdir
+#    repos are unaffected.
 #
 # We intentionally do NOT stub ``find_gateway_pids`` / ``_scan_gateway_pids``
 # here — tests of those functions themselves need the real implementation.
@@ -570,6 +581,11 @@ def _live_system_guard(request, monkeypatch):
     ``sudo systemctl ...``, ``env systemctl ...``, ``setsid systemctl ...``
     are all caught. ``pkill``/``killall``/``taskkill`` invocations
     targeting hermes/python patterns are also blocked.
+
+    Subprocess inspection also blocks mutating ``git`` commands (stash /
+    reset / checkout / pull / ...) whose effective directory — ``cwd``
+    kwarg or ``git -C`` — is this repository checkout, plus spawns of
+    the real ``hermes update`` CLI. See the block comment above.
     """
     if request.node.get_closest_marker(_LIVE_SYSTEM_GUARD_BYPASS_MARK):
         yield
@@ -728,7 +744,102 @@ def _live_system_guard(request, monkeypatch):
                     return True
         return False
 
-    def _check_subprocess_cmd(name, cmd):
+    # ── Real-repo git mutation guard ────────────────────────────────
+    # Verbs that change the working tree, index, or branch state. Bare
+    # ``git stash`` means ``stash push``; only ``stash list/show`` are
+    # read-only. Inspection commands (status, rev-parse, log, diff,
+    # ls-files, fetch, ...) pass through untouched.
+    _GIT_MUTATING_VERBS = frozenset({
+        "stash", "reset", "checkout", "switch", "restore", "pull",
+        "push", "merge", "rebase", "clean", "commit", "cherry-pick",
+        "revert", "am",
+    })
+    _REPO_ROOT = PROJECT_ROOT.resolve()
+
+    def _git_mutation_dir(cmd, cwd):
+        """Directory a mutating git command would act on, or None if benign."""
+        cmd_str = _cmd_to_string(cmd)
+        if "git" not in cmd_str:
+            return None
+        try:
+            tokens = _shlex.split(cmd_str)
+        except ValueError:
+            tokens = cmd_str.split()
+        git_idx = next(
+            (
+                i for i, t in enumerate(tokens)
+                if t.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] in ("git", "git.exe")
+            ),
+            None,
+        )
+        if git_idx is None:
+            return None
+        # Walk git's global options to find ``-C <dir>`` overrides and
+        # the subcommand.
+        c_dir = None
+        sub = None
+        sub_idx = None
+        i = git_idx + 1
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "-C":
+                if i + 1 < len(tokens):
+                    c_dir = tokens[i + 1]
+                i += 2
+                continue
+            if tok == "-c":
+                i += 2
+                continue
+            if tok.startswith("-"):
+                i += 1
+                continue
+            sub = tok
+            sub_idx = i
+            break
+        if sub not in _GIT_MUTATING_VERBS:
+            return None
+        if sub == "stash":
+            nxt = tokens[sub_idx + 1] if sub_idx + 1 < len(tokens) else "push"
+            if nxt in ("list", "show"):
+                return None
+        if c_dir is not None:
+            return Path(c_dir)
+        return Path(_os.fsdecode(cwd)) if cwd else Path(_os.getcwd())
+
+    def _is_blocked_git(cmd, cwd):
+        try:
+            target = _git_mutation_dir(cmd, cwd)
+            if target is None:
+                return False
+            resolved = target.resolve()
+        except Exception:
+            return False
+        return resolved == _REPO_ROOT or _REPO_ROOT in resolved.parents
+
+    def _is_real_updater_spawn(cmd) -> bool:
+        """True for child-process spawns of the real ``hermes update`` CLI.
+
+        The guard can't see inside a child interpreter, so the updater
+        must be blocked at the spawn. Matches ``hermes update``,
+        ``python -m hermes_cli.main update``, ``python cli.py update``,
+        and ``python .../hermes_cli/main.py update``.
+        """
+        cmd_str = _cmd_to_string(cmd)
+        if "update" not in cmd_str:
+            return False
+        try:
+            tokens = _shlex.split(cmd_str)
+        except ValueError:
+            tokens = cmd_str.split()
+        for i, tok in enumerate(tokens[:-1]):
+            head = tok.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            if (
+                head in ("hermes", "cli.py", "main.py") or tok == "hermes_cli.main"
+            ) and tokens[i + 1] == "update":
+                return True
+        return False
+
+    def _check_subprocess_cmd(name, cmd, cwd=None):
         if _is_blocked_systemctl(cmd):
             raise RuntimeError(
                 f"tests/conftest.py live-system guard: blocked "
@@ -745,10 +856,29 @@ def _live_system_guard(request, monkeypatch):
                 "Mark with @pytest.mark.live_system_guard_bypass if "
                 "intentional."
             )
+        if _is_blocked_git(cmd, cwd):
+            raise RuntimeError(
+                f"tests/conftest.py live-system guard: blocked "
+                f"subprocess.{name}({cmd!r}, cwd={cwd!r}) — mutating git "
+                "command targeting THIS repository checkout. A leaked "
+                "cmd_update flow autostashes the developer's uncommitted "
+                "work and resets the branch. Point the test at a tmp_path "
+                "repo, mock subprocess.run / _stash_local_changes_if_needed "
+                "and PROJECT_ROOT, or mark with "
+                "@pytest.mark.live_system_guard_bypass."
+            )
+        if _is_real_updater_spawn(cmd):
+            raise RuntimeError(
+                f"tests/conftest.py live-system guard: blocked "
+                f"subprocess.{name}({cmd!r}) — spawning the real "
+                "'hermes update' CLI would run the updater's git flow "
+                "against this repository checkout. Mock the spawn, or "
+                "mark with @pytest.mark.live_system_guard_bypass."
+            )
 
     def _wrap_subprocess(name, real):
         def _guarded(cmd, *args, **kwargs):
-            _check_subprocess_cmd(name, cmd)
+            _check_subprocess_cmd(name, cmd, kwargs.get("cwd"))
             return real(cmd, *args, **kwargs)
         _guarded.__name__ = f"_guarded_{name}"
         # Make the wrapper subscriptable like the wrapped callable when
@@ -766,7 +896,7 @@ def _live_system_guard(request, monkeypatch):
 
         class _GuardedPopen(real):  # type: ignore[misc, valid-type]
             def __init__(self, cmd, *args, **kwargs):
-                _check_subprocess_cmd("Popen", cmd)
+                _check_subprocess_cmd("Popen", cmd, kwargs.get("cwd"))
                 super().__init__(cmd, *args, **kwargs)
 
         _GuardedPopen.__name__ = "Popen"
@@ -838,12 +968,15 @@ def _live_system_guard(request, monkeypatch):
 
         async def _guarded_async_exec(program, *args, **kwargs):
             _check_subprocess_cmd(
-                "asyncio.create_subprocess_exec", [program, *args]
+                "asyncio.create_subprocess_exec", [program, *args],
+                kwargs.get("cwd"),
             )
             return await real_async_exec(program, *args, **kwargs)
 
         async def _guarded_async_shell(cmd, *args, **kwargs):
-            _check_subprocess_cmd("asyncio.create_subprocess_shell", cmd)
+            _check_subprocess_cmd(
+                "asyncio.create_subprocess_shell", cmd, kwargs.get("cwd")
+            )
             return await real_async_shell(cmd, *args, **kwargs)
 
         monkeypatch.setattr(_asyncio, "create_subprocess_exec", _guarded_async_exec)

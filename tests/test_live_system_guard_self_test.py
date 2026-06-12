@@ -278,6 +278,130 @@ def test_normal_subprocess_run_passes_through():
     assert r.stdout.strip() == "hello"
 
 
+# ──────────────────── real-repo git mutation guard ─────────────
+#
+# A leaked ``cmd_update`` flow autostashes the developer's uncommitted
+# work, runs ``reset --hard``, and flips the branch to main (observed
+# 2026-06-12 during a parallel tests/hermes_cli run — the working-tree
+# variant of the PR #23397 gateway kills). Every blocked payload below
+# is deliberately a NO-OP even if the guard were broken, so this canary
+# can never damage the repo itself.
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_git_stash_in_repo_root_blocked():
+    """The exact primitive that destroyed uncommitted work: git stash."""
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        # Pathspec matches nothing — harmless if it ever executed.
+        subprocess.run(
+            ["git", "stash", "push", "-m", "guard-self-test",
+             "--", "no-such-file-guard-self-test"],
+            cwd=REPO_ROOT,
+        )
+
+
+def test_git_reset_in_repo_root_blocked():
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        # --soft HEAD is a no-op if it ever executed.
+        subprocess.run(["git", "reset", "--soft", "HEAD"], cwd=REPO_ROOT)
+
+
+def test_git_checkout_in_repo_root_blocked():
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        # Pathspec matches nothing — errors out harmlessly if executed.
+        subprocess.run(
+            ["git", "checkout", "--", "no-such-file-guard-self-test"],
+            cwd=REPO_ROOT,
+        )
+
+
+def test_git_dash_c_repo_root_blocked():
+    """``git -C <repo>`` overrides cwd — must be caught too."""
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(["git", "-C", REPO_ROOT, "reset", "--soft", "HEAD"])
+
+
+def test_git_mutation_in_repo_subdir_blocked():
+    """Mutating git anywhere INSIDE the checkout acts on the same repo."""
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(
+            ["git", "reset", "--soft", "HEAD"],
+            cwd=os.path.join(REPO_ROOT, "tests"),
+        )
+
+
+def test_git_default_cwd_in_repo_root_blocked(monkeypatch):
+    """No cwd kwarg: the guard falls back to the process working dir."""
+    monkeypatch.chdir(REPO_ROOT)
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(["git", "reset", "--soft", "HEAD"])
+
+
+def test_git_popen_stash_blocked():
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.Popen(
+            ["git", "stash", "push", "-m", "guard-self-test",
+             "--", "no-such-file-guard-self-test"],
+            cwd=REPO_ROOT,
+        )
+
+
+def test_real_updater_spawn_blocked():
+    """Spawning the real ``hermes update`` CLI runs the updater's git
+    flow against this checkout in a child the guard can't see into."""
+    # Nonexistent interpreter path: if the guard were broken this would
+    # raise FileNotFoundError instead of running anything.
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(["/nonexistent-guard-self-test/hermes", "update"])
+
+
+def test_python_m_hermes_cli_update_spawn_blocked():
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(
+            ["/nonexistent-guard-self-test/python", "-m",
+             "hermes_cli.main", "update"]
+        )
+
+
+def test_git_readonly_in_repo_root_passes_through():
+    """status / rev-parse / stash list are inspection — must still work."""
+    r = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+    )
+    assert r is not None
+    r = subprocess.run(
+        ["git", "stash", "list"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+    )
+    assert r is not None
+
+
+def test_git_mutation_in_tmp_repo_passes_through(tmp_path):
+    """Tempdir repos are exactly where test git fixtures SHOULD mutate."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    (tmp_path / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True)
+    # Mutating verbs in the tmp repo sail through the guard.
+    subprocess.run(["git", "reset", "--soft", "HEAD"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "checkout", "--", "."], cwd=tmp_path, check=True)
+
+
+def test_hermes_update_check_not_blocked():
+    """Only the exact ``update`` subcommand is the updater — not
+    ``update-check`` and friends."""
+    # Allowed by the guard, then fails on the nonexistent binary —
+    # proving the guard did NOT intercept it.
+    with pytest.raises(FileNotFoundError):
+        subprocess.run(["/nonexistent-guard-self-test/hermes", "update-check"])
+
+
 # ──────────────────── bypass marker ─────────────────────────────
 
 
