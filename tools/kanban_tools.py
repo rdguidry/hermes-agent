@@ -758,9 +758,21 @@ def _handle_create(args: dict, **kw) -> str:
     triage, bool_error = _parse_bool_arg(args, "triage")
     if bool_error:
         return tool_error(bool_error)
+    auto_model_routing, auto_model_error = _parse_bool_arg(
+        args, "auto_model_routing", default=True
+    )
+    if auto_model_error:
+        return tool_error(auto_model_error)
     idempotency_key = args.get("idempotency_key")
     max_runtime_seconds = args.get("max_runtime_seconds")
     initial_status = args.get("initial_status") or "running"
+    model_override = args.get("model_override")
+    if model_override is not None:
+        if not isinstance(model_override, str):
+            return tool_error(
+                f"model_override must be a string, got {type(model_override).__name__}"
+            )
+        model_override = model_override.strip() or None
     skills = args.get("skills")
     if isinstance(skills, str):
         # Accept a single skill name as a string for convenience.
@@ -809,6 +821,8 @@ def _handle_create(args: dict, **kw) -> str:
                     if max_runtime_seconds is not None else None
                 ),
                 skills=skills,
+                model_override=model_override,
+                auto_model_routing=auto_model_routing,
                 goal_mode=goal_mode,
                 goal_max_turns=(
                     int(goal_max_turns) if goal_max_turns is not None else None
@@ -1275,6 +1289,23 @@ KANBAN_CREATE_SCHEMA = {
                     "task, ['github-code-review'] for a reviewer task. "
                     "The names must match skills installed on the "
                     "assignee's profile."
+                ),
+            },
+            "model_override": {
+                "type": "string",
+                "description": (
+                    "Optional model id for the dispatched worker. The "
+                    "dispatcher passes it through as 'hermes -m <model>'. "
+                    "Use only when the card explicitly needs a specialist "
+                    "or lower-cost model; omit to use the assignee/default "
+                    "routing."
+                ),
+            },
+            "auto_model_routing": {
+                "type": "boolean",
+                "description": (
+                    "Whether to apply config-driven model routing when "
+                    "model_override is omitted. Defaults to true."
                 ),
             },
             "goal_mode": {

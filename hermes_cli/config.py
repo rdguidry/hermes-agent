@@ -2130,6 +2130,19 @@ DEFAULT_CONFIG = {
         # assignee to any installed profile. When unset, falls back to the
         # default profile. A task never ends up with assignee=None.
         "default_assignee": "",
+        # Optional deterministic per-task model router. Disabled by default
+        # so upstream installs keep the historical profile/default model
+        # behavior unless the operator opts in. When enabled, kanban task
+        # creation stores a model_override on new cards that do not already
+        # provide one; the dispatcher then passes that model via `-m`.
+        "model_routing": {
+            "enabled": False,
+            "default_model": "",
+            "code_model": "",
+            "classifier_model": "",
+            "synthesis_model": "",
+            "no_tool_classifier_model": "",
+        },
         # Per-profile concurrency cap (#21582). When set to a positive int,
         # no single profile can have more than N workers running at once,
         # even if the global max_in_progress / max_spawn caps would allow

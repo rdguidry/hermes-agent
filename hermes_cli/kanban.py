@@ -75,6 +75,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "completed_at": t.completed_at,
         "result": t.result,
         "skills": list(t.skills) if t.skills else [],
+        "model_override": t.model_override,
         "max_retries": t.max_retries,
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
@@ -333,6 +334,14 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "(repeatable). Appended to the built-in "
                                "kanban-worker skill. Example: "
                                "--skill translation --skill github-code-review")
+    p_create.add_argument("--model", default=None, dest="model_override",
+                          help="Model id to pass to the dispatched worker "
+                               "as 'hermes -m <model>'. Omit to use the "
+                               "assignee/default model.")
+    p_create.add_argument("--no-auto-model-routing", action="store_false",
+                          dest="auto_model_routing", default=None,
+                          help="Disable config-driven Kanban model routing "
+                               "for this task.")
     p_create.add_argument("--max-retries", type=int, default=None,
                           metavar="N",
                           help="Per-task override for the consecutive-failure "
@@ -1342,6 +1351,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             idempotency_key=getattr(args, "idempotency_key", None),
             max_runtime_seconds=max_runtime,
             skills=getattr(args, "skills", None) or None,
+            model_override=getattr(args, "model_override", None),
+            auto_model_routing=getattr(args, "auto_model_routing", None),
             max_retries=max_retries,
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),

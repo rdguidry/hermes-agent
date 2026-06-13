@@ -100,6 +100,25 @@ _log = logging.getLogger(__name__)
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
+
+_AUTO_MODEL_CODE_TERMS = {
+    "api", "build", "ci", "cli", "code", "commit", "debug", "diff",
+    "docker", "eslint", "failing test", "git", "implementation",
+    "javascript", "lint", "migration", "npm", "patch", "pr", "pytest",
+    "python", "rebase", "refactor", "repo", "repository", "schema",
+    "script", "source", "typescript",
+}
+
+_AUTO_MODEL_CLASSIFIER_TERMS = {
+    "classify", "dedupe", "extract", "filter", "label", "normalize",
+    "parse", "rank", "route", "score", "tag", "triage",
+}
+
+_AUTO_MODEL_SYNTHESIS_TERMS = {
+    "analysis", "brief", "compare", "deep dive", "investigate",
+    "long context", "report", "research", "strategy", "synthesis",
+    "synthesize", "writeup",
+}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -2049,6 +2068,81 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _truthy_config_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return False
+
+
+def _routing_model(routing: dict, key: str) -> Optional[str]:
+    value = routing.get(key)
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def resolve_auto_model_override(
+    *,
+    title: str,
+    body: Optional[str] = None,
+    assignee: Optional[str] = None,
+    skills: Optional[Iterable[str]] = None,
+    kanban_cfg: Optional[dict] = None,
+) -> Optional[str]:
+    """Return a config-driven model override for a new task, if enabled.
+
+    The router is deterministic and makes no extra model call. The selected
+    model is persisted on the card at creation time so operators can inspect
+    or override it before dispatch.
+    """
+    if kanban_cfg is None:
+        try:
+            from hermes_cli.config import load_config
+            kanban_cfg = (load_config().get("kanban") or {})
+        except Exception:
+            kanban_cfg = {}
+    routing = kanban_cfg.get("model_routing") if isinstance(kanban_cfg, dict) else None
+    if not isinstance(routing, dict) or not _truthy_config_value(routing.get("enabled")):
+        return None
+
+    skill_text = " ".join(str(s) for s in (skills or ()) if s)
+    text = " ".join(
+        part for part in (
+            title or "",
+            body or "",
+            assignee or "",
+            skill_text,
+        )
+        if part
+    ).lower()
+
+    # Code gets first refusal. It is cheaper to route code-heavy work to the
+    # right worker once than to repair a weak classifier's attempt later.
+    if any(term in text for term in _AUTO_MODEL_CODE_TERMS):
+        model = _routing_model(routing, "code_model")
+        if model:
+            return model
+
+    # Reserve the larger synthesis model for explicit long-form work or
+    # materially large prompts.
+    if len(text) > 6000 or any(term in text for term in _AUTO_MODEL_SYNTHESIS_TERMS):
+        model = _routing_model(routing, "synthesis_model")
+        if model:
+            return model
+
+    if any(term in text for term in _AUTO_MODEL_CLASSIFIER_TERMS):
+        model = _routing_model(routing, "classifier_model")
+        if model:
+            return model
+
+    return _routing_model(routing, "default_model")
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -2066,6 +2160,8 @@ def create_task(
     idempotency_key: Optional[str] = None,
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
+    model_override: Optional[str] = None,
+    auto_model_routing: Optional[bool] = None,
     max_retries: Optional[int] = None,
     goal_mode: bool = False,
     goal_max_turns: Optional[int] = None,
@@ -2096,6 +2192,14 @@ def create_task(
     ``kanban-worker``. Use this to pin a task to a specialist skill
     (e.g. ``skills=["translation"]`` so the worker loads the
     translation skill regardless of the profile's default config).
+
+    ``model_override`` is an optional model id for the dispatched
+    worker. When present, the dispatcher passes it through as
+    ``hermes -m <model>``.
+
+    ``auto_model_routing`` controls config-driven model selection when
+    ``model_override`` is omitted. ``None`` means use config; ``False``
+    disables routing for this create call.
     """
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
@@ -2113,6 +2217,8 @@ def create_task(
         branch_name = str(branch_name).strip() or None
     if branch_name and workspace_kind != "worktree":
         raise ValueError("branch_name is only valid for worktree workspaces")
+    if model_override is not None:
+        model_override = str(model_override).strip() or None
     parents = tuple(p for p in parents if p)
 
     # Normalise + validate skills: strip whitespace, drop empties, dedupe
@@ -2159,6 +2265,14 @@ def create_task(
                 "capabilities (e.g. `web`, `browser`, `terminal`)."
             )
         skills_list = cleaned
+
+    if model_override is None and auto_model_routing is not False:
+        model_override = resolve_auto_model_override(
+            title=title,
+            body=body,
+            assignee=assignee,
+            skills=skills_list,
+        )
 
     # Idempotency check — return the existing task instead of creating a
     # duplicate. Done BEFORE entering write_txn to keep the fast path fast
@@ -2236,8 +2350,9 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
-                        skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        skills, model_override, max_retries, goal_mode,
+                        goal_max_turns, session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2255,6 +2370,7 @@ def create_task(
                         idempotency_key,
                         int(max_runtime_seconds) if max_runtime_seconds is not None else None,
                         json.dumps(skills_list) if skills_list is not None else None,
+                        model_override,
                         int(max_retries) if max_retries is not None else None,
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
@@ -2277,6 +2393,7 @@ def create_task(
                         "tenant": tenant,
                         "branch_name": branch_name,
                         "skills": list(skills_list) if skills_list else None,
+                        "model_override": model_override,
                         "goal_mode": bool(goal_mode) or None,
                     },
                 )

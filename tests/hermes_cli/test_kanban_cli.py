@@ -167,6 +167,47 @@ def test_run_slash_json_output(kanban_home):
     assert payload["status"] == "ready"
 
 
+def test_run_slash_create_with_model_override(kanban_home):
+    model = "xiaomi-mimo-v2-5"
+    out = kc.run_slash(
+        f"create 'routed task' --assignee alice --model {model} --json"
+    )
+    payload = json.loads(out)
+    assert payload["model_override"] == model
+
+    show = kc.run_slash(f"show {payload['id']}")
+    assert f"model:     {model}" in show
+
+
+def test_run_slash_create_auto_model_routing(kanban_home, monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "model_routing": {
+                    "enabled": True,
+                    "default_model": "xiaomi-mimo-v2-5",
+                    "code_model": "qwen3-coder-480b-a35b-instruct-turbo",
+                },
+            }
+        },
+    )
+
+    routed = json.loads(
+        kc.run_slash("create 'fix pytest failure' --assignee alice --json")
+    )
+    assert routed["model_override"] == "qwen3-coder-480b-a35b-instruct-turbo"
+
+    unrouted = json.loads(
+        kc.run_slash(
+            "create 'fix another pytest failure' --assignee alice "
+            "--no-auto-model-routing --json"
+        )
+    )
+    assert unrouted["model_override"] is None
+
+
 def test_run_slash_dispatch_dry_run_counts(kanban_home):
     kc.run_slash("create 'a' --assignee alice")
     kc.run_slash("create 'b' --assignee bob")

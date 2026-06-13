@@ -768,6 +768,104 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
+def test_create_accepts_model_override(worker_env):
+    from tools import kanban_tools as kt
+    out = kt._handle_create({
+        "title": "routed child",
+        "assignee": "peer",
+        "model_override": " deepseek-v4-flash ",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, d["task_id"])
+        assert child.model_override == "deepseek-v4-flash"
+    finally:
+        conn.close()
+
+
+def test_create_auto_routes_model_from_config(worker_env, monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "model_routing": {
+                    "enabled": True,
+                    "default_model": "xiaomi-mimo-v2-5",
+                    "classifier_model": "deepseek-v4-flash",
+                }
+            }
+        },
+    )
+
+    from tools import kanban_tools as kt
+    out = kt._handle_create({
+        "title": "classify inbox updates",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, d["task_id"])
+        assert child.model_override == "deepseek-v4-flash"
+    finally:
+        conn.close()
+
+
+def test_create_can_disable_auto_model_routing(worker_env, monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "model_routing": {
+                    "enabled": True,
+                    "default_model": "xiaomi-mimo-v2-5",
+                }
+            }
+        },
+    )
+
+    from tools import kanban_tools as kt
+    out = kt._handle_create({
+        "title": "plain child",
+        "assignee": "peer",
+        "auto_model_routing": False,
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, d["task_id"])
+        assert child.model_override is None
+    finally:
+        conn.close()
+
+
+def test_create_rejects_non_string_model_override(worker_env):
+    from tools import kanban_tools as kt
+    out = kt._handle_create({
+        "title": "bad routed child",
+        "assignee": "peer",
+        "model_override": 123,
+    })
+    assert "model_override must be a string" in json.loads(out).get("error", "")
+
+
+def test_create_schema_exposes_model_override():
+    from tools.kanban_tools import KANBAN_CREATE_SCHEMA
+    props = KANBAN_CREATE_SCHEMA["parameters"]["properties"]
+    assert props["model_override"]["type"] == "string"
+    assert props["auto_model_routing"]["type"] == "boolean"
+
+
 def test_create_inherits_worker_dir_workspace(monkeypatch, worker_env):
     """A worker scoped to a dir: task that spawns a child without a
     workspace arg inherits the dir, not scratch (so follow-up code-gen

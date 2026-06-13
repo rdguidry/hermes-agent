@@ -89,6 +89,94 @@ def test_no_idempotency_key_never_collides(kanban_home):
         conn.close()
 
 
+def test_create_task_persists_model_override(kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="routed worker",
+            assignee="worker",
+            model_override="  qwen3-coder-480b-a35b-instruct-turbo  ",
+        )
+        task = kb.get_task(conn, tid)
+        assert task.model_override == "qwen3-coder-480b-a35b-instruct-turbo"
+    finally:
+        conn.close()
+
+
+def test_auto_model_routing_is_disabled_without_config(kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="fix pytest failure", assignee="worker")
+        task = kb.get_task(conn, tid)
+        assert task.model_override is None
+    finally:
+        conn.close()
+
+
+def test_create_task_auto_routes_model_from_config(kanban_home, monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "model_routing": {
+                    "enabled": True,
+                    "default_model": "xiaomi-mimo-v2-5",
+                    "code_model": "qwen3-coder-480b-a35b-instruct-turbo",
+                    "classifier_model": "deepseek-v4-flash",
+                    "synthesis_model": "qwen-3-7-plus",
+                }
+            }
+        },
+    )
+    conn = kb.connect()
+    try:
+        code = kb.create_task(conn, title="fix pytest failure", assignee="worker")
+        classify = kb.create_task(conn, title="classify inbound leads", assignee="worker")
+        default = kb.create_task(conn, title="call the office", assignee="worker")
+        disabled = kb.create_task(
+            conn,
+            title="fix another pytest failure",
+            assignee="worker",
+            auto_model_routing=False,
+        )
+
+        assert kb.get_task(conn, code).model_override == (
+            "qwen3-coder-480b-a35b-instruct-turbo"
+        )
+        assert kb.get_task(conn, classify).model_override == "deepseek-v4-flash"
+        assert kb.get_task(conn, default).model_override == "xiaomi-mimo-v2-5"
+        assert kb.get_task(conn, disabled).model_override is None
+    finally:
+        conn.close()
+
+
+def test_explicit_model_override_wins_over_auto_model_routing(kanban_home, monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "model_routing": {
+                    "enabled": True,
+                    "default_model": "xiaomi-mimo-v2-5",
+                    "code_model": "qwen3-coder-480b-a35b-instruct-turbo",
+                }
+            }
+        },
+    )
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="fix pytest failure",
+            assignee="worker",
+            model_override="kimi-k2-6",
+        )
+        assert kb.get_task(conn, tid).model_override == "kimi-k2-6"
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Spawn-failure circuit breaker
 # ---------------------------------------------------------------------------
@@ -3032,6 +3120,52 @@ def test_default_spawn_appends_per_task_skills(kanban_home, monkeypatch):
     assert last_skills_idx < chat_idx, (
         f"--skills must come before 'chat' in argv: {cmd}"
     )
+
+
+def test_default_spawn_passes_auto_routed_model_override(kanban_home, monkeypatch):
+    """Auto-selected model_override should reach worker argv as -m <model>."""
+    monkeypatch.setattr(kb, "_kanban_worker_skill_available", lambda _h: True)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "model_routing": {
+                    "enabled": True,
+                    "default_model": "xiaomi-mimo-v2-5",
+                    "code_model": "qwen3-coder-480b-a35b-instruct-turbo",
+                }
+            }
+        },
+    )
+    captured = {}
+
+    class FakeProc:
+        pid = 43
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="fix pytest failure",
+            assignee="coder",
+        )
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        kb._default_spawn(task, str(workspace))
+    finally:
+        conn.close()
+
+    cmd = captured["cmd"]
+    assert task.model_override == "qwen3-coder-480b-a35b-instruct-turbo"
+    assert "-m" in cmd
+    assert cmd[cmd.index("-m") + 1] == "qwen3-coder-480b-a35b-instruct-turbo"
+    assert cmd.index("-m") < cmd.index("chat")
 
 
 def test_default_spawn_dedupes_kanban_worker_from_task_skills(kanban_home, monkeypatch):
