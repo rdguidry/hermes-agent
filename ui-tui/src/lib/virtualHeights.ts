@@ -75,12 +75,14 @@ export const estimatedMsgHeight = (
     leadGap = false,
     thinkingVisible = details,
     toolsVisible = details,
+    termuxMode = TERMUX_TUI_MODE,
     userPrompt = '',
     withSeparator = false
   }: {
     compact: boolean
     details: boolean
     leadGap?: boolean
+    termuxMode?: boolean
     thinkingVisible?: boolean
     toolsVisible?: boolean
     userPrompt?: string
@@ -103,7 +105,7 @@ export const estimatedMsgHeight = (
     return Math.max(2, msg.todos.length + 2)
   }
 
-  const bodyWidth = transcriptBodyWidth(cols, msg.role, userPrompt, TERMUX_TUI_MODE)
+  const bodyWidth = transcriptBodyWidth(cols, msg.role, userPrompt, termuxMode)
   const text = msg.text
   let h = wrappedLines(text || ' ', bodyWidth)
 
